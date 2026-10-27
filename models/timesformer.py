@@ -295,7 +295,7 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, mask, get_attn=False, get_all=False):
+    def forward_features(self, x, mask, mask_weight=None, get_attn=False, get_all=False):
         B = x.shape[0]
         th = x.shape[-1] // 16
         x_origin = x
@@ -413,7 +413,28 @@ class VisionTransformer(nn.Module):
             x_origin = x_origin.permute(0, 2, 1, 3, 4)
             x_origin = rearrange(x_origin, 'b t c h w -> (b t) c h w')
             loss_recon = F.l1_loss(x_origin, x_rec, reduction='none')
-            loss = (loss_recon * mask).sum() / (mask.sum() + 1e-5) / 3
+            if mask_weight is not None:
+                while mask_weight.dim() > 3:
+                    mask_weight = mask_weight.squeeze(1)
+                if mask_weight.dim() == 2:
+                    mask_weight = mask_weight.view(mask_weight.shape[0], H, W)
+                if mask_weight.shape[0] != BT_now:
+                    if mask_weight.shape[0] > BT_now:
+                        mask_weight = mask_weight[:BT_now]
+                    else:
+                        repeat_times = (BT_now + mask_weight.shape[0] - 1) // mask_weight.shape[0]
+                        mask_weight = mask_weight.repeat(repeat_times, 1, 1)[:BT_now]
+                if mask_weight.shape[1] != H or mask_weight.shape[2] != W:
+                    mask_weight = torch.nn.functional.interpolate(
+                        mask_weight.float().unsqueeze(1), size=(H, W), mode='nearest'
+                    ).squeeze(1)
+                mask_weight = mask_weight.float().repeat_interleave(self.patch_size, 1).repeat_interleave(
+                    self.patch_size, 2
+                ).unsqueeze(1).contiguous()
+                loss_mask = mask * mask_weight
+                loss = (loss_recon * loss_mask).sum() / (loss_mask.sum() + 1e-5) / 3
+            else:
+                loss = (loss_recon * mask).sum() / (mask.sum() + 1e-5) / 3
             return loss, x_rec
         else:
             if get_attn:
@@ -421,8 +442,8 @@ class VisionTransformer(nn.Module):
             else:
                 return x[:, 0]
 
-    def forward(self, x, mask=None, get_attn=False ,use_head=False):
-        x = self.forward_features(x, mask, get_attn)
+    def forward(self, x, mask=None, mask_weight=None, get_attn=False ,use_head=False):
+        x = self.forward_features(x, mask, mask_weight, get_attn)
         if use_head:
             x = self.head(x)
         return x
